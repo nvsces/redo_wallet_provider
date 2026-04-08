@@ -140,7 +140,71 @@ class BitcoinProvider implements BlockchainProvider {
 
   @override
   Future<List<TxInfo>> getTransactionHistory(String address, {int limit = 20}) async {
-    return [];
+    // Blockstream `/address/:addr/txs` returns the most recent 50
+    // mempool transactions and up to 25 confirmed, newest first. For
+    // a wallet list view this is plenty without deeper pagination.
+    try {
+      final json = await _get('/address/$address/txs');
+      final rows = json as List;
+      return rows
+          .take(limit)
+          .map<TxInfo>((tx) => _parseTxInfo(tx as Map<String, dynamic>, address))
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  TxInfo _parseTxInfo(Map<String, dynamic> map, String myAddress) {
+    final status = map['status'] as Map<String, dynamic>?;
+    final confirmed = status?['confirmed'] as bool? ?? false;
+    final blockHeight = status?['block_height'] as int?;
+    final blockTime = status?['block_time'] as int?;
+
+    BigInt totalIn = BigInt.zero;
+    BigInt totalOut = BigInt.zero;
+    BigInt myIn = BigInt.zero;
+    BigInt myOut = BigInt.zero;
+    String from = '';
+    String to = '';
+
+    for (final input in (map['vin'] as List? ?? [])) {
+      final prevout = (input as Map)['prevout'] as Map?;
+      final value = BigInt.from(prevout?['value'] as int? ?? 0);
+      final addr = prevout?['scriptpubkey_address'] as String? ?? '';
+      totalIn += value;
+      if (addr == myAddress) myIn += value;
+      if (from.isEmpty && addr.isNotEmpty && addr != myAddress) from = addr;
+      if (from.isEmpty) from = addr;
+    }
+
+    for (final output in (map['vout'] as List? ?? [])) {
+      final value = BigInt.from((output as Map)['value'] as int? ?? 0);
+      final addr = output['scriptpubkey_address'] as String? ?? '';
+      totalOut += value;
+      if (addr == myAddress) myOut += value;
+      if (to.isEmpty && addr.isNotEmpty && addr != myAddress) to = addr;
+      if (to.isEmpty) to = addr;
+    }
+
+    // Net flow for the viewer: positive means incoming, negative outgoing.
+    // Fee is only borne by the sender — attribute it only when we paid.
+    final net = myOut - myIn;
+    final amount = net.abs();
+    final fee = myIn > BigInt.zero ? (totalIn - totalOut) : BigInt.zero;
+
+    return TxInfo(
+      hash: map['txid'] as String? ?? '',
+      status: confirmed ? TxStatus.confirmed : TxStatus.pending,
+      from: from,
+      to: to,
+      amount: amount,
+      fee: fee,
+      blockNumber: blockHeight,
+      timestamp: blockTime != null
+          ? DateTime.fromMillisecondsSinceEpoch(blockTime * 1000)
+          : null,
+    );
   }
 
   // ── Bitcoin-специфичные методы ──
