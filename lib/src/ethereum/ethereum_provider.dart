@@ -94,6 +94,13 @@ class EthereumProvider implements BlockchainProvider {
     return int.parse(result as String);
   }
 
+  @override
+  Future<List<TxInfo>> getTransactionHistory(String address, {int limit = 20}) async {
+    // Ethereum JSON-RPC не поддерживает историю транзакций напрямую.
+    // Для полной реализации нужен Etherscan/Alchemy API.
+    return [];
+  }
+
   // ── Ethereum-специфичные методы ──
 
   /// Получить nonce (кол-во транзакций) для адреса.

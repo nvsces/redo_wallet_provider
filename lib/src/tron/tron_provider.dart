@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:http/http.dart' as http;
 import 'package:redo_wallet_provider/src/core/provider.dart';
 
@@ -29,6 +30,27 @@ class TronResources {
   @override
   String toString() =>
       'Bandwidth: $freeBandwidth free + $stakedBandwidth staked, Energy: $availableEnergy';
+}
+
+/// Информация о блоке для формирования транзакции.
+class TronBlockInfo {
+  final int number;
+  final String hash;
+  final int timestamp;
+  final String txTrieRoot;
+  final String parentHash;
+  final String witnessAddress;
+  final int version;
+
+  const TronBlockInfo({
+    required this.number,
+    required this.hash,
+    required this.timestamp,
+    required this.txTrieRoot,
+    required this.parentHash,
+    required this.witnessAddress,
+    required this.version,
+  });
 }
 
 /// Tron провайдер через TronGrid HTTP API.
@@ -137,6 +159,26 @@ class TronProvider implements BlockchainProvider {
     return json['block_header']?['raw_data']?['number'] as int? ?? 0;
   }
 
+  @override
+  Future<List<TxInfo>> getTransactionHistory(String address, {int limit = 20}) async {
+    try {
+      final uri = Uri.parse('$baseUrl/v1/accounts/$address/transactions')
+          .replace(queryParameters: {
+        'limit': limit.toString(),
+        'only_confirmed': 'true',
+      });
+
+      final resp = await _client.get(uri, headers: _headers);
+      if (resp.statusCode != 200) return [];
+      final decoded = jsonDecode(resp.body) as Map<String, dynamic>;
+      final data = decoded['data'] as List? ?? [];
+
+      return data.map<TxInfo>((tx) => _parseTxInfo(tx, address)).toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
   // ════════════════════════════════════════════
   //  Tron-специфичные методы
   // ════════════════════════════════════════════
@@ -237,12 +279,17 @@ class TronProvider implements BlockchainProvider {
   }
 
   /// Получить последний блок (нужен для ref_block при создании транзакции).
-  Future<({int number, String hash})> getLatestBlock() async {
+  Future<TronBlockInfo> getLatestBlock() async {
     final json = await _post('/wallet/getnowblock', {});
     final rawData = json['block_header']?['raw_data'] as Map<String, dynamic>? ?? {};
-    return (
+    return TronBlockInfo(
       number: rawData['number'] as int? ?? 0,
       hash: json['blockID'] as String? ?? '',
+      timestamp: rawData['timestamp'] as int? ?? 0,
+      txTrieRoot: rawData['txTrieRoot'] as String? ?? '',
+      parentHash: rawData['parentHash'] as String? ?? '',
+      witnessAddress: rawData['witness_address'] as String? ?? '',
+      version: rawData['version'] as int? ?? 0,
     );
   }
 
@@ -308,5 +355,141 @@ class TronProvider implements BlockchainProvider {
     }
   }
 
+  /// Получить балансы всех TRC-20 токенов.
+  Future<List<TokenBalanceInfo>> getTrc20Balances(String ownerAddress) async {
+    try {
+      final uri = Uri.parse('$baseUrl/v1/accounts/$ownerAddress');
+      final resp = await _client.get(uri, headers: _headers);
+      if (resp.statusCode != 200) return [];
+      final decoded = jsonDecode(resp.body) as Map<String, dynamic>;
+      final data = decoded['data'] as List? ?? [];
+      if (data.isEmpty) return [];
+
+      final account = data[0] as Map<String, dynamic>;
+      final trc20 = account['trc20'] as List? ?? [];
+
+      final result = <TokenBalanceInfo>[];
+
+      for (final tokenMap in trc20) {
+        if (tokenMap is! Map<String, dynamic>) continue;
+        for (final entry in tokenMap.entries) {
+          final contractAddress = entry.key;
+          final balance = BigInt.tryParse(entry.value?.toString() ?? '0') ?? BigInt.zero;
+          if (balance <= BigInt.zero) continue;
+
+          final info = await getTrc20Info(contractAddress);
+          if (info == null) continue;
+
+          result.add(TokenBalanceInfo(
+            contractAddress: contractAddress,
+            walletAddress: ownerAddress,
+            balance: balance,
+            symbol: info.symbol,
+            name: info.name,
+            decimals: info.decimals,
+          ));
+        }
+      }
+
+      return result;
+    } catch (_) {
+      return [];
+    }
+  }
+
   void close() => _client.close();
+
+  // ════════════════════════════════════════════
+  //  Private helpers
+  // ════════════════════════════════════════════
+
+  TxInfo _parseTxInfo(Map<String, dynamic> tx, String myAddress) {
+    BigInt amount = BigInt.zero;
+    String from = '';
+    String to = '';
+
+    final rawData = tx['raw_data'] as Map<String, dynamic>? ?? {};
+    final contracts = rawData['contract'] as List? ?? [];
+
+    if (contracts.isNotEmpty) {
+      final contract = contracts[0] as Map<String, dynamic>;
+      final type = contract['type'] as String? ?? '';
+      final param = contract['parameter']?['value'] as Map<String, dynamic>? ?? {};
+
+      if (type == 'TransferContract') {
+        amount = BigInt.from(param['amount'] as int? ?? 0);
+        final rawFrom = param['owner_address'] as String? ?? '';
+        final rawTo = param['to_address'] as String? ?? '';
+        // API v1 returns hex addresses — convert to base58
+        from = rawFrom.startsWith('41') && rawFrom.length == 42
+            ? _hexToBase58(rawFrom) ?? rawFrom
+            : rawFrom;
+        to = rawTo.startsWith('41') && rawTo.length == 42
+            ? _hexToBase58(rawTo) ?? rawTo
+            : rawTo;
+      }
+    }
+
+    final timestamp = tx['block_timestamp'] as int? ?? 0;
+    final fee = tx['ret']?[0]?['fee'] as int? ?? 0;
+    final hash = tx['txID'] as String? ?? '';
+    final ret = tx['ret']?[0]?['contractRet'] as String?;
+
+    return TxInfo(
+      hash: hash,
+      status: ret == 'SUCCESS' ? TxStatus.confirmed : TxStatus.failed,
+      from: from,
+      to: to,
+      amount: amount,
+      fee: BigInt.from(fee),
+      timestamp: DateTime.fromMillisecondsSinceEpoch(timestamp),
+    );
+  }
+
+  /// Конвертировать hex адрес (41-prefixed) в Tron base58check.
+  String? _hexToBase58(String hex) {
+    try {
+      const alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+
+      // Decode hex to bytes
+      final bytes = <int>[];
+      for (var i = 0; i < hex.length; i += 2) {
+        bytes.add(int.parse(hex.substring(i, i + 2), radix: 16));
+      }
+      final payload = Uint8List.fromList(bytes);
+
+      // Double SHA-256 for checksum
+      final hash1 = crypto.sha256.convert(payload).bytes;
+      final hash2 = crypto.sha256.convert(hash1).bytes;
+      final checksum = hash2.sublist(0, 4);
+
+      final addressBytes = Uint8List.fromList([...payload, ...checksum]);
+
+      // Encode to base58
+      var num = BigInt.zero;
+      for (final b in addressBytes) {
+        num = num * BigInt.from(256) + BigInt.from(b);
+      }
+
+      final sb = StringBuffer();
+      while (num > BigInt.zero) {
+        final rem = (num % BigInt.from(58)).toInt();
+        num = num ~/ BigInt.from(58);
+        sb.write(alphabet[rem]);
+      }
+
+      // Add leading '1' for each leading zero byte
+      for (final b in addressBytes) {
+        if (b == 0) {
+          sb.write('1');
+        } else {
+          break;
+        }
+      }
+
+      return sb.toString().split('').reversed.join();
+    } catch (_) {
+      return null;
+    }
+  }
 }

@@ -39,6 +39,8 @@ class TxInfo {
   final BigInt fee;
   final int? blockNumber;
   final DateTime? timestamp;
+  final String? comment;
+  final Uint8List? bodyData;
 
   const TxInfo({
     required this.hash,
@@ -49,6 +51,29 @@ class TxInfo {
     required this.fee,
     this.blockNumber,
     this.timestamp,
+    this.comment,
+    this.bodyData,
+  });
+}
+
+/// Информация о балансе токена (Jetton, TRC-20, ERC-20, SPL).
+class TokenBalanceInfo {
+  final String contractAddress;
+  final String walletAddress;
+  final BigInt balance;
+  final String symbol;
+  final String name;
+  final int decimals;
+  final String? imageUrl;
+
+  const TokenBalanceInfo({
+    required this.contractAddress,
+    required this.walletAddress,
+    required this.balance,
+    required this.symbol,
+    required this.name,
+    required this.decimals,
+    this.imageUrl,
   });
 }
 
@@ -72,4 +97,7 @@ abstract class BlockchainProvider {
 
   /// Текущая высота блока.
   Future<int> getBlockNumber();
+
+  /// История транзакций для адреса.
+  Future<List<TxInfo>> getTransactionHistory(String address, {int limit = 20});
 }

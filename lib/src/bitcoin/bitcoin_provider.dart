@@ -138,6 +138,11 @@ class BitcoinProvider implements BlockchainProvider {
     return int.parse(text.trim());
   }
 
+  @override
+  Future<List<TxInfo>> getTransactionHistory(String address, {int limit = 20}) async {
+    return [];
+  }
+
   // ── Bitcoin-специфичные методы ──
 
   /// Получить UTXO для адреса (нужны для построения транзакции).

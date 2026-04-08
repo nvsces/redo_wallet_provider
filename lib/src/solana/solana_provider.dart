@@ -78,6 +78,11 @@ class SolanaProvider implements BlockchainProvider {
     return result as int;
   }
 
+  @override
+  Future<List<TxInfo>> getTransactionHistory(String address, {int limit = 20}) async {
+    return [];
+  }
+
   // ── Solana-специфичные методы ──
 
   /// Получить последний blockhash (нужен для транзакций).
