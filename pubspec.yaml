@@ -3,6 +3,8 @@ description: Blockchain network providers — send transactions, query balances,
 version: 0.1.0
 publish_to: none
 
+# SPDX-License-Identifier: MIT
+
 environment:
   sdk: ^3.10.4
 
